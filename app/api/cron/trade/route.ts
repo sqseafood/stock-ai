@@ -4,6 +4,7 @@ import { getAccount, getPositions, placeBuyOrder, closePosition } from "@/lib/al
 import { getQuote, getCandles, getMetrics, delay } from "@/lib/finnhub";
 import { calcRSI, calcMACD, signalStrength } from "@/lib/indicators";
 import { WATCHLIST } from "@/lib/stocks";
+import { getFearGreed, getVIX, getUpcomingEarnings, getWSBSentiment } from "@/lib/market-context";
 import type { ScanResult } from "@/app/api/scan/route";
 import type { AIDecision } from "@/app/api/ai-trader/route";
 
@@ -59,7 +60,8 @@ async function scanAll(): Promise<ScanResult[]> {
 async function getAIDecisions(
   scanResults: ScanResult[],
   positions: { ticker: string; shares: number; buyPrice: number }[],
-  cash: number
+  cash: number,
+  context: { fearGreedScore: number | null; fearGreedRating: string | null; vix: number | null; earnings: { ticker: string; date: string }[]; wsb: { ticker: string; mentions: number; sentiment: string; topPost: string }[] }
 ): Promise<AIDecision[]> {
   const heldMap = new Map(positions.map((p) => [p.ticker, p]));
 
@@ -76,9 +78,36 @@ async function getAIDecisions(
       `  ${s.ticker} (${s.sector}): $${s.price.toFixed(2)}, signal: ${s.signal}, RSI: ${s.rsi}, 52W%: ${s.posIn52}%, MACD hist: ${s.macdHistogram.toFixed(3)}`
     ).join("\n");
 
+  const earningsWarning = context.earnings.length > 0
+    ? context.earnings.map((e) => `  ${e.ticker} reports on ${e.date} — AVOID buying, consider selling before`).join("
+")
+    : "  None in next 7 days";
+
+  const wsbLines = context.wsb.length > 0
+    ? context.wsb.map((w) => `  ${w.ticker}: ${w.mentions} mentions, ${w.sentiment} — "${w.topPost}"`).join("
+")
+    : "  No significant mentions";
+
+  const marketMood = context.fearGreedScore !== null
+    ? `Fear & Greed: ${context.fearGreedScore}/100 (${context.fearGreedRating})`
+    : "Fear & Greed: unavailable";
+  const vixLine = context.vix !== null
+    ? `VIX: ${context.vix} (${context.vix > 30 ? "HIGH VOLATILITY — be cautious" : context.vix > 20 ? "Elevated volatility" : "Normal"})`
+    : "VIX: unavailable";
+
   const prompt = `You are an AI stock trader. Buy-low, sell-high strategy. No emotional bias.
 
 PORTFOLIO: $${cash.toFixed(2)} cash. $${TRADE_AMOUNT.toLocaleString()} per trade. Max 1 position per stock.
+
+MARKET CONDITIONS:
+  ${marketMood}
+  ${vixLine}
+
+UPCOMING EARNINGS (avoid these — high risk):
+${earningsWarning}
+
+REDDIT WSB SENTIMENT:
+${wsbLines}
 
 CURRENT POSITIONS:
 ${positionLines || "  None"}
@@ -86,8 +115,10 @@ ${positionLines || "  None"}
 WATCHLIST (not held):
 ${watchlistLines}
 
-BUY if: signal BUY/STRONG BUY, RSI < 50, 52W% < 60%, MACD positive, have cash
-SELL if: signal SELL/STRONG SELL, OR gain > 18%, OR loss > 9%, OR RSI > 68
+BUY if: signal BUY/STRONG BUY, RSI < 50, 52W% < 60%, MACD positive, have cash, Fear&Greed not Extreme Greed, no earnings this week
+SELL if: signal SELL/STRONG SELL, OR gain > 18%, OR loss > 9%, OR RSI > 68, OR earnings within 2 days
+EXTRA CAUTION if: VIX > 30 (only strong buys), Fear&Greed < 20 (Extreme Fear — wait for stabilization)
+WSB MOMENTUM: if 3+ bullish mentions and technical signals agree, slightly favor buying
 
 Return ONLY a JSON array with BUY/SELL actions (skip HOLD):
 [{"ticker":"XYZ","action":"BUY","reason":"one sentence"}]
@@ -169,7 +200,18 @@ export async function GET(req: NextRequest) {
       positions = portfolio.positions;
     }
 
-    const decisions = await getAIDecisions(scanResults, positions, cash);
+    const [fearGreed, vix, earnings, wsb] = await Promise.all([
+      getFearGreed(), getVIX(), getUpcomingEarnings(), getWSBSentiment(),
+    ]);
+    const context = {
+      fearGreedScore: fearGreed?.score ?? null,
+      fearGreedRating: fearGreed?.rating ?? null,
+      vix,
+      earnings,
+      wsb,
+    };
+
+    const decisions = await getAIDecisions(scanResults, positions, cash, context);
     const executedTrades: { ticker: string; action: string; reason: string; price: number }[] = [];
     const sorted = [...decisions].sort((a, b) =>
       a.action === "SELL" && b.action === "BUY" ? -1 : 1
