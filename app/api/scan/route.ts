@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { getQuote, getCandles, getMetrics, delay } from "@/lib/finnhub";
-import { calcRSI, calcMACD, signalStrength } from "@/lib/indicators";
+import { calcRSI, calcMACD, calcBollingerBands, signalStrength } from "@/lib/indicators";
 import { WATCHLIST } from "@/lib/stocks";
 
 export const dynamic = "force-dynamic";
@@ -21,6 +21,9 @@ export interface ScanResult {
   score: number;
   pe: number | null;
   marketCap: number | null;
+  change5d: number;
+  volumeRatio: number;
+  bollingerPos: number; // 0=at lower band, 100=at upper band
 }
 
 async function scanTicker(ticker: string, name: string, sector: string): Promise<ScanResult | null> {
@@ -34,6 +37,7 @@ async function scanTicker(ticker: string, name: string, sector: string): Promise
     if (!quote.c || !candles.closes.length) return null;
 
     const closes = candles.closes;
+    const volumes = candles.volumes;
     const price = quote.c;
     const low52 = metrics.metric?.["52WeekLow"] ?? Math.min(...closes);
     const high52 = metrics.metric?.["52WeekHigh"] ?? Math.max(...closes);
@@ -46,6 +50,17 @@ async function scanTicker(ticker: string, name: string, sector: string): Promise
     const marketCap = metrics.metric?.marketCapitalization
       ? metrics.metric.marketCapitalization * 1_000_000
       : null;
+    const change5d = closes.length >= 6
+      ? +((closes[closes.length - 1] / closes[closes.length - 6] - 1) * 100).toFixed(2)
+      : 0;
+    const avgVol = volumes.length > 0
+      ? volumes.slice(-20).reduce((a, b) => a + b, 0) / Math.min(volumes.length, 20)
+      : 0;
+    const lastVol = volumes[volumes.length - 1] ?? 0;
+    const volumeRatio = avgVol > 0 ? Math.round((lastVol / avgVol) * 10) / 10 : 1;
+    const { upper, lower } = calcBollingerBands(closes);
+    const bbRange = upper - lower;
+    const bollingerPos = bbRange > 0 ? Math.round(((price - lower) / bbRange) * 100) : 50;
 
     return {
       ticker, name, sector, price,
@@ -55,6 +70,7 @@ async function scanTicker(ticker: string, name: string, sector: string): Promise
       low52, high52, posIn52, signal, score,
       pe: pe && pe > 0 ? pe : null,
       marketCap,
+      change5d, volumeRatio, bollingerPos,
     };
   } catch {
     return null;

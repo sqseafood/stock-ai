@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { appendCronLog, loadPortfolio, savePortfolio, applySell, applyBuy, TRADE_AMOUNT } from "@/lib/portfolio-server";
 import { getAccount, getPositions, placeBuyOrder, closePosition } from "@/lib/alpaca";
 import { getQuote, getCandles, getMetrics, delay } from "@/lib/finnhub";
-import { calcRSI, calcMACD, signalStrength } from "@/lib/indicators";
+import { calcRSI, calcMACD, calcBollingerBands, signalStrength } from "@/lib/indicators";
 import { buildWatchlist, getBatch } from "@/lib/stocks-full";
 import { loadConfig, saveConfig } from "@/lib/watchlist-config";
 import { getFearGreed, getVIX, getUpcomingEarnings, getWSBSentiment } from "@/lib/market-context";
@@ -34,6 +34,7 @@ async function scanAll(watchlist: { ticker: string; name: string; sector: string
       ]);
       if (!quote.c || !candles.closes.length) continue;
       const closes = candles.closes;
+      const volumes = candles.volumes;
       const price = quote.c;
       const low52 = metrics.metric?.["52WeekLow"] ?? Math.min(...closes);
       const high52 = metrics.metric?.["52WeekHigh"] ?? Math.max(...closes);
@@ -45,12 +46,22 @@ async function scanAll(watchlist: { ticker: string; name: string; sector: string
       const pe = metrics.metric?.peExclExtraTTM;
       const marketCap = metrics.metric?.marketCapitalization
         ? metrics.metric.marketCapitalization * 1_000_000 : null;
+      const change5d = closes.length >= 6
+        ? +((closes[closes.length - 1] / closes[closes.length - 6] - 1) * 100).toFixed(2) : 0;
+      const avgVol = volumes.length > 0
+        ? volumes.slice(-20).reduce((a: number, b: number) => a + b, 0) / Math.min(volumes.length, 20) : 0;
+      const lastVol = volumes[volumes.length - 1] ?? 0;
+      const volumeRatio = avgVol > 0 ? Math.round((lastVol / avgVol) * 10) / 10 : 1;
+      const { upper, lower } = calcBollingerBands(closes);
+      const bbRange = upper - lower;
+      const bollingerPos = bbRange > 0 ? Math.round(((price - lower) / bbRange) * 100) : 50;
       results.push({
         ticker, name, sector, price,
         change: quote.d ?? 0, changePct: quote.dp ?? 0,
         rsi, macdHistogram: histogram,
         low52, high52, posIn52, signal, score,
         pe: pe && pe > 0 ? pe : null, marketCap,
+        change5d, volumeRatio, bollingerPos,
       });
     } catch { /* skip */ }
     if (i < watchlist.length - 1) await delay(500);
@@ -76,54 +87,63 @@ async function getAIDecisions(
   const watchlistLines = scanResults
     .filter((s) => !heldMap.has(s.ticker))
     .map((s) =>
-      `  ${s.ticker} (${s.sector}): $${s.price.toFixed(2)}, signal: ${s.signal}, RSI: ${s.rsi}, 52W%: ${s.posIn52}%, MACD hist: ${s.macdHistogram.toFixed(3)}`
+      `  ${s.ticker} (${s.sector}): $${s.price.toFixed(2)} | 1d: ${s.changePct.toFixed(1)}% | 5d: ${s.change5d}% | RSI: ${s.rsi} | signal: ${s.signal} | vol: ${s.volumeRatio}x | BB: ${s.bollingerPos}% | 52W: ${s.posIn52}%`
     ).join("\n");
 
   const earningsWarning = context.earnings.length > 0
-    ? context.earnings.map((e) => `  ${e.ticker} reports on ${e.date} — AVOID buying, consider selling before`).join(
-)
+    ? context.earnings.map((e) => `  ${e.ticker} reports on ${e.date}`).join("\n")
     : "  None in next 7 days";
 
   const wsbLines = context.wsb.length > 0
-    ? context.wsb.map((w) => `  ${w.ticker}: ${w.mentions} mentions, ${w.sentiment} — "${w.topPost}"`).join(
-)
+    ? context.wsb.map((w) => `  ${w.ticker}: ${w.mentions} mentions, ${w.sentiment} — "${w.topPost}"`).join("\n")
     : "  No significant mentions";
 
   const marketMood = context.fearGreedScore !== null
     ? `Fear & Greed: ${context.fearGreedScore}/100 (${context.fearGreedRating})`
     : "Fear & Greed: unavailable";
   const vixLine = context.vix !== null
-    ? `VIX: ${context.vix} (${context.vix > 30 ? "HIGH VOLATILITY — be cautious" : context.vix > 20 ? "Elevated volatility" : "Normal"})`
+    ? `VIX: ${context.vix} (${context.vix > 30 ? "HIGH VOLATILITY" : context.vix > 20 ? "Elevated" : "Normal"})`
     : "VIX: unavailable";
 
-  const prompt = `You are an AI stock trader. Buy-low, sell-high strategy. No emotional bias.
+  const prompt = `You are an aggressive AI stock trader. Your ONLY goal is to MAXIMIZE PROFIT.
 
-PORTFOLIO: $${cash.toFixed(2)} cash. $${TRADE_AMOUNT.toLocaleString()} per trade. Max 1 position per stock.
+Use ANY strategy that makes money:
+- Momentum: buy stocks surging with high volume, sell when momentum fades
+- Mean reversion: buy extreme oversold dips, sell recovery
+- Breakout: buy when volume spikes + price breaks resistance
+- Scalping: take quick 1-3% gains and recycle capital into the next trade
+- Trend: buy stocks in strong uptrends (RSI 50-65, rising 5d momentum)
 
-MARKET CONDITIONS:
+PORTFOLIO: $${cash.toFixed(2)} cash | $${TRADE_AMOUNT.toLocaleString()} per trade | Max 1 position per ticker
+
+MARKET:
   ${marketMood}
   ${vixLine}
 
-UPCOMING EARNINGS (avoid these — high risk):
+UPCOMING EARNINGS (high risk — avoid buying, consider selling before):
 ${earningsWarning}
 
-REDDIT WSB SENTIMENT:
+REDDIT WSB (momentum signals):
 ${wsbLines}
 
-CURRENT POSITIONS:
+CURRENT POSITIONS (ticker | bought | now | P&L% | RSI | signal):
 ${positionLines || "  None"}
 
-WATCHLIST (not held):
+WATCHLIST (ticker | sector | price | 1d% | 5d% | RSI | signal | vol ratio | BB pos | 52W%):
 ${watchlistLines}
 
-BUY if: signal BUY/STRONG BUY, RSI < 50, 52W% < 60%, MACD positive, have cash, Fear&Greed not Extreme Greed, no earnings this week
-SELL if: signal SELL/STRONG SELL, OR gain > 18%, OR loss > 9%, OR RSI > 68, OR earnings within 2 days
-EXTRA CAUTION if: VIX > 30 (only strong buys), Fear&Greed < 20 (Extreme Fear — wait for stabilization)
-WSB MOMENTUM: if 3+ bullish mentions and technical signals agree, slightly favor buying
+HARD RULES — never break these:
+1. Max 8 open positions total (currently holding ${positions.length})
+2. SELL immediately if any position is down -3% or more — capital protection
+3. Avoid buying stocks with earnings within 2 days
 
-Return ONLY a JSON array with BUY/SELL actions (skip HOLD):
-[{"ticker":"XYZ","action":"BUY","reason":"one sentence"}]
-Empty array if no trades needed.`;
+EVERYTHING ELSE IS YOUR CALL. Be aggressive. Make multiple trades per run if opportunities exist.
+High volume ratio (>1.5x) = unusual activity — pay attention.
+BB position: 0% = at lower band (oversold), 100% = at upper band (overbought).
+
+Return ONLY a JSON array of ALL trades you want to execute right now:
+[{"ticker":"XYZ","action":"BUY","reason":"one sentence"},{"ticker":"ABC","action":"SELL","reason":"one sentence"}]
+Empty array [] if no good opportunities.`;
 
   for (const model of GEMINI_MODELS) {
     try {
@@ -223,7 +243,34 @@ export async function GET(req: NextRequest) {
       wsb,
     };
 
+    // Forced stop-loss: sell any position down -3% regardless of AI
+    const forcedSells: typeof positions = [];
+    for (const pos of positions) {
+      const scan = scanResults.find((s) => s.ticker === pos.ticker);
+      if (scan) {
+        const pnlPct = ((scan.price - pos.buyPrice) / pos.buyPrice) * 100;
+        if (pnlPct <= -3) forcedSells.push(pos);
+      }
+    }
+
     const decisions = await getAIDecisions(scanResults, positions, cash, context);
+
+    // Merge forced sells (deduplicate with AI decisions)
+    const aiSellTickers = new Set(decisions.filter((d) => d.action === "SELL").map((d) => d.ticker));
+    for (const pos of forcedSells) {
+      if (!aiSellTickers.has(pos.ticker)) {
+        const scan = scanResults.find((s) => s.ticker === pos.ticker)!;
+        decisions.push({
+          ticker: pos.ticker, name: pos.name, action: "SELL",
+          reason: "Forced stop-loss: position down -3%",
+          currentPrice: scan.price, signal: scan.signal,
+          rsi: scan.rsi, posIn52: scan.posIn52,
+          buyPrice: pos.buyPrice,
+          unrealizedPnLPct: ((scan.price - pos.buyPrice) / pos.buyPrice) * 100,
+        });
+      }
+    }
+
     const executedTrades: { ticker: string; action: string; reason: string; price: number }[] = [];
     const sorted = [...decisions].sort((a, b) =>
       a.action === "SELL" && b.action === "BUY" ? -1 : 1
