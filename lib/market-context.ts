@@ -106,7 +106,7 @@ export async function getWSBSentiment(): Promise<RedditMention[]> {
       .map(([ticker, v]) => ({
         ticker,
         mentions: v.count,
-        sentiment: v.bullish > v.bearish ? "bullish" : v.bearish > v.bullish ? "bearish" : "mixed",
+        sentiment: (v.bullish > v.bearish ? "bullish" : v.bearish > v.bullish ? "bearish" : "mixed") as "bullish" | "bearish" | "mixed",
         topPost: v.topPost,
       }))
       .sort((a, b) => b.mentions - a.mentions);
