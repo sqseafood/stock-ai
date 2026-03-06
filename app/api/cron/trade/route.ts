@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
-import { loadPortfolio, savePortfolio, applyBuy, applySell, appendCronLog } from "@/lib/portfolio-server";
+import { appendCronLog, loadPortfolio, savePortfolio, applySell, applyBuy, TRADE_AMOUNT } from "@/lib/portfolio-server";
+import { getAccount, getPositions, placeBuyOrder, closePosition } from "@/lib/alpaca";
 import { getQuote, getCandles, getMetrics, delay } from "@/lib/finnhub";
 import { calcRSI, calcMACD, signalStrength } from "@/lib/indicators";
 import { WATCHLIST } from "@/lib/stocks";
@@ -7,19 +8,17 @@ import type { ScanResult } from "@/app/api/scan/route";
 import type { AIDecision } from "@/app/api/ai-trader/route";
 
 export const dynamic = "force-dynamic";
-export const maxDuration = 300; // 5 min timeout for Vercel
+export const maxDuration = 300;
 
 const GEMINI_MODELS = ["gemini-2.5-flash", "gemini-2.0-flash-001", "gemini-3-flash-preview"];
+const USE_ALPACA = !!(process.env.ALPACA_KEY_ID && process.env.ALPACA_SECRET_KEY);
 
-// US market hours check (9:30 AM – 4:00 PM ET, Mon–Fri)
 function isMarketOpen(): boolean {
   const now = new Date();
   const et = new Date(now.toLocaleString("en-US", { timeZone: "America/New_York" }));
-  const day = et.getDay(); // 0=Sun, 6=Sat
+  const day = et.getDay();
   if (day === 0 || day === 6) return false;
-  const hours = et.getHours();
-  const mins = et.getMinutes();
-  const totalMins = hours * 60 + mins;
+  const totalMins = et.getHours() * 60 + et.getMinutes();
   return totalMins >= 9 * 60 + 30 && totalMins < 16 * 60;
 }
 
@@ -29,9 +28,7 @@ async function scanAll(): Promise<ScanResult[]> {
     const { ticker, name, sector } = WATCHLIST[i];
     try {
       const [quote, candles, metrics] = await Promise.all([
-        getQuote(ticker),
-        getCandles(ticker, 6),
-        getMetrics(ticker),
+        getQuote(ticker), getCandles(ticker, 6), getMetrics(ticker),
       ]);
       if (!quote.c || !candles.closes.length) continue;
       const closes = candles.closes;
@@ -53,7 +50,7 @@ async function scanAll(): Promise<ScanResult[]> {
         low52, high52, posIn52, signal, score,
         pe: pe && pe > 0 ? pe : null, marketCap,
       });
-    } catch { /* skip failed tickers */ }
+    } catch { /* skip */ }
     if (i < WATCHLIST.length - 1) await delay(500);
   }
   return results;
@@ -61,7 +58,7 @@ async function scanAll(): Promise<ScanResult[]> {
 
 async function getAIDecisions(
   scanResults: ScanResult[],
-  positions: { ticker: string; name: string; shares: number; buyPrice: number; buySignal: string }[],
+  positions: { ticker: string; shares: number; buyPrice: number }[],
   cash: number
 ): Promise<AIDecision[]> {
   const heldMap = new Map(positions.map((p) => [p.ticker, p]));
@@ -81,7 +78,7 @@ async function getAIDecisions(
 
   const prompt = `You are an AI stock trader. Buy-low, sell-high strategy. No emotional bias.
 
-PORTFOLIO: $${cash.toFixed(2)} cash. $2,000 per trade. Max 1 position per stock.
+PORTFOLIO: $${cash.toFixed(2)} cash. $${TRADE_AMOUNT.toLocaleString()} per trade. Max 1 position per stock.
 
 CURRENT POSITIONS:
 ${positionLines || "  None"}
@@ -137,7 +134,6 @@ Empty array if no trades needed.`;
 }
 
 export async function GET(req: NextRequest) {
-  // Verify cron secret to prevent unauthorized triggers
   const authHeader = req.headers.get("authorization");
   if (authHeader !== `Bearer ${process.env.CRON_SECRET}`) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
@@ -150,41 +146,67 @@ export async function GET(req: NextRequest) {
   }
 
   try {
-    // 1. Scan market
     const scanResults = await scanAll();
     if (!scanResults.length) {
       return NextResponse.json({ skipped: true, reason: "No scan data" });
     }
 
-    // 2. Load current portfolio
-    const portfolio = await loadPortfolio();
+    let cash: number;
+    let positions: { ticker: string; name: string; shares: number; buyPrice: number }[];
 
-    // 3. Get AI decisions
-    const decisions = await getAIDecisions(scanResults, portfolio.positions, portfolio.cash);
+    if (USE_ALPACA) {
+      const [account, alpacaPositions] = await Promise.all([getAccount(), getPositions()]);
+      cash = parseFloat(account.cash);
+      positions = alpacaPositions.map((p) => ({
+        ticker: p.symbol,
+        name: WATCHLIST.find((w) => w.ticker === p.symbol)?.name ?? p.symbol,
+        shares: parseFloat(p.qty),
+        buyPrice: parseFloat(p.avg_entry_price),
+      }));
+    } else {
+      const portfolio = await loadPortfolio();
+      cash = portfolio.cash;
+      positions = portfolio.positions;
+    }
 
-    // 4. Execute trades — sells first, then buys
+    const decisions = await getAIDecisions(scanResults, positions, cash);
     const executedTrades: { ticker: string; action: string; reason: string; price: number }[] = [];
     const sorted = [...decisions].sort((a, b) =>
       a.action === "SELL" && b.action === "BUY" ? -1 : 1
     );
 
     for (const d of sorted) {
-      let err: string | null = null;
-      if (d.action === "BUY") {
-        err = applyBuy(portfolio, d.ticker, d.name, d.currentPrice, d.signal, "cron");
-      } else {
-        err = applySell(portfolio, d.ticker, d.currentPrice, d.signal, "cron");
-      }
-      if (!err) {
+      try {
+        if (USE_ALPACA) {
+          if (d.action === "BUY") {
+            await placeBuyOrder(d.ticker, TRADE_AMOUNT);
+          } else {
+            await closePosition(d.ticker);
+          }
+        } else {
+          const portfolio = await loadPortfolio();
+          let err: string | null = null;
+          if (d.action === "BUY") {
+            err = applyBuy(portfolio, d.ticker, d.name, d.currentPrice, d.signal, "cron");
+          } else {
+            err = applySell(portfolio, d.ticker, d.currentPrice, d.signal, "cron");
+          }
+          if (err) continue;
+          await savePortfolio(portfolio);
+        }
         executedTrades.push({ ticker: d.ticker, action: d.action, reason: d.reason, price: d.currentPrice });
+      } catch (tradeErr) {
+        console.error(`Trade failed for ${d.ticker}:`, tradeErr);
       }
     }
 
-    // 5. Save portfolio + log
-    await savePortfolio(portfolio);
     await appendCronLog({ runAt, decisionsCount: executedTrades.length, trades: executedTrades });
-
-    return NextResponse.json({ success: true, tradesExecuted: executedTrades.length, trades: executedTrades });
+    return NextResponse.json({
+      success: true,
+      mode: USE_ALPACA ? "alpaca-paper" : "mock",
+      tradesExecuted: executedTrades.length,
+      trades: executedTrades,
+    });
   } catch (err) {
     await appendCronLog({ runAt, decisionsCount: 0, trades: [], error: (err as Error).message });
     return NextResponse.json({ error: (err as Error).message }, { status: 500 });

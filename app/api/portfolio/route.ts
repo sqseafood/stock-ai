@@ -3,10 +3,40 @@ import {
   loadPortfolio, savePortfolio, applyBuy, applySell,
   STARTING_CASH, type Portfolio,
 } from "@/lib/portfolio-server";
+import { getAccount, getPositions } from "@/lib/alpaca";
+import { WATCHLIST } from "@/lib/stocks";
 
 export const dynamic = "force-dynamic";
 
+const USE_ALPACA = !!(process.env.ALPACA_KEY_ID && process.env.ALPACA_SECRET_KEY);
+
 export async function GET() {
+  if (USE_ALPACA) {
+    try {
+      const [account, alpacaPositions, mockPortfolio] = await Promise.all([
+        getAccount(),
+        getPositions(),
+        loadPortfolio(),
+      ]);
+      const portfolio: Portfolio = {
+        cash: parseFloat(account.cash),
+        startingCash: mockPortfolio.startingCash ?? STARTING_CASH,
+        positions: alpacaPositions.map((p) => ({
+          ticker: p.symbol,
+          name: WATCHLIST.find((w) => w.ticker === p.symbol)?.name ?? p.symbol,
+          shares: parseFloat(p.qty),
+          buyPrice: parseFloat(p.avg_entry_price),
+          buyDate: "",
+          buySignal: "",
+        })),
+        trades: mockPortfolio.trades,
+      };
+      return NextResponse.json(portfolio);
+    } catch (err) {
+      return NextResponse.json({ error: (err as Error).message }, { status: 500 });
+    }
+  }
+
   const portfolio = await loadPortfolio();
   return NextResponse.json(portfolio);
 }
