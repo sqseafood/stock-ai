@@ -79,13 +79,13 @@ async function getAIDecisions(
     ).join("\n");
 
   const earningsWarning = context.earnings.length > 0
-    ? context.earnings.map((e) => `  ${e.ticker} reports on ${e.date} — AVOID buying, consider selling before`).join("
-")
+    ? context.earnings.map((e) => `  ${e.ticker} reports on ${e.date} — AVOID buying, consider selling before`).join(
+)
     : "  None in next 7 days";
 
   const wsbLines = context.wsb.length > 0
-    ? context.wsb.map((w) => `  ${w.ticker}: ${w.mentions} mentions, ${w.sentiment} — "${w.topPost}"`).join("
-")
+    ? context.wsb.map((w) => `  ${w.ticker}: ${w.mentions} mentions, ${w.sentiment} — "${w.topPost}"`).join(
+)
     : "  No significant mentions";
 
   const marketMood = context.fearGreedScore !== null
