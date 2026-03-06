@@ -32,8 +32,10 @@ export async function GET() {
         trades: mockPortfolio.trades,
       };
       return NextResponse.json(portfolio);
-    } catch (err) {
-      return NextResponse.json({ error: (err as Error).message }, { status: 500 });
+    } catch {
+      // Alpaca unavailable — fall back to mock portfolio
+      const portfolio = await loadPortfolio();
+      return NextResponse.json(portfolio);
     }
   }
 
