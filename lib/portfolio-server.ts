@@ -1,4 +1,4 @@
-import { put, head, del } from "@vercel/blob";
+import { put, list, head, del } from "@vercel/blob";
 
 export interface Position {
   ticker: string;
@@ -52,8 +52,9 @@ async function blobExists(key: string): Promise<boolean> {
 
 export async function loadPortfolio(): Promise<Portfolio> {
   try {
-    const url = `${process.env.BLOB_BASE_URL}/${PORTFOLIO_KEY}`;
-    const res = await fetch(url, { next: { revalidate: 0 } });
+    const { blobs } = await list({ prefix: PORTFOLIO_KEY });
+    if (!blobs.length) return { cash: STARTING_CASH, positions: [], trades: [] };
+    const res = await fetch(blobs[0].url, { cache: "no-store" });
     if (!res.ok) return { cash: STARTING_CASH, positions: [], trades: [] };
     return await res.json();
   } catch {
@@ -71,8 +72,9 @@ export async function savePortfolio(p: Portfolio): Promise<void> {
 
 export async function loadCronLog(): Promise<CronLog[]> {
   try {
-    const url = `${process.env.BLOB_BASE_URL}/${CRON_LOG_KEY}`;
-    const res = await fetch(url, { next: { revalidate: 0 } });
+    const { blobs } = await list({ prefix: CRON_LOG_KEY });
+    if (!blobs.length) return [];
+    const res = await fetch(blobs[0].url, { cache: "no-store" });
     if (!res.ok) return [];
     return await res.json();
   } catch { return []; }
