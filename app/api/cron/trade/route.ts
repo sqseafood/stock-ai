@@ -69,34 +69,76 @@ async function scanAll(watchlist: { ticker: string; name: string; sector: string
   return results;
 }
 
-async function getAIDecisions(
+type Context = {
+  fearGreedScore: number | null;
+  fearGreedRating: string | null;
+  vix: number | null;
+  earnings: { ticker: string; date: string }[];
+  wsb: { ticker: string; mentions: number; sentiment: string; topPost: string }[];
+};
+
+type Candidate = {
+  ticker: string;
+  name: string;
+  action: "BUY" | "SELL";
+  technicalReason: string;
+  scan: ScanResult;
+  buyPrice?: number;
+  pnlPct?: number;
+};
+
+// Phase 1: Pure rules — no AI, no hallucinations
+function applyRules(
   scanResults: ScanResult[],
-  positions: { ticker: string; shares: number; buyPrice: number }[],
+  positions: { ticker: string; name: string; shares: number; buyPrice: number }[],
   cash: number,
-  context: { fearGreedScore: number | null; fearGreedRating: string | null; vix: number | null; earnings: { ticker: string; date: string }[]; wsb: { ticker: string; mentions: number; sentiment: string; topPost: string }[] }
-): Promise<AIDecision[]> {
+  earningsTickers: Set<string>,
+): Candidate[] {
   const heldMap = new Map(positions.map((p) => [p.ticker, p]));
+  const candidates: Candidate[] = [];
 
-  const positionLines = positions.map((p) => {
-    const scan = scanResults.find((s) => s.ticker === p.ticker);
-    const current = scan?.price ?? p.buyPrice;
-    const pnlPct = ((current - p.buyPrice) / p.buyPrice) * 100;
-    return `  ${p.ticker}: bought $${p.buyPrice.toFixed(2)}, now $${current.toFixed(2)} (${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(1)}%), signal: ${scan?.signal ?? "?"}, RSI: ${scan?.rsi ?? "?"}`;
-  }).join("\n");
+  // --- SELL rules ---
+  for (const pos of positions) {
+    const scan = scanResults.find((s) => s.ticker === pos.ticker);
+    if (!scan) continue;
+    const pnlPct = ((scan.price - pos.buyPrice) / pos.buyPrice) * 100;
+    let reason = "";
+    if (pnlPct <= -3)                                          reason = `Stop-loss triggered: down ${pnlPct.toFixed(1)}%`;
+    else if (pnlPct >= 12)                                     reason = `Profit target hit: up ${pnlPct.toFixed(1)}%`;
+    else if (pnlPct >= 5 && (scan.rsi > 65 || scan.macdHistogram < 0)) reason = `Quick profit ${pnlPct.toFixed(1)}%: momentum fading (RSI ${scan.rsi})`;
+    else if (scan.rsi > 70)                                    reason = `Overbought: RSI ${scan.rsi}`;
+    else if (earningsTickers.has(pos.ticker))                  reason = `Earnings within 2 days — exit before report`;
+    if (reason) candidates.push({ ticker: pos.ticker, name: pos.name, action: "SELL", technicalReason: reason, scan, buyPrice: pos.buyPrice, pnlPct });
+  }
 
-  const watchlistLines = scanResults
-    .filter((s) => !heldMap.has(s.ticker))
-    .map((s) =>
-      `  ${s.ticker} (${s.sector}): $${s.price.toFixed(2)} | 1d: ${s.changePct.toFixed(1)}% | 5d: ${s.change5d}% | RSI: ${s.rsi} | signal: ${s.signal} | vol: ${s.volumeRatio}x | BB: ${s.bollingerPos}% | 52W: ${s.posIn52}%`
-    ).join("\n");
+  // --- BUY rules ---
+  const openSlots = 8 - positions.length;
+  if (cash >= TRADE_AMOUNT * 0.5 && openSlots > 0) {
+    let slots = openSlots;
+    for (const s of scanResults) {
+      if (slots <= 0) break;
+      if (heldMap.has(s.ticker)) continue;
+      if (earningsTickers.has(s.ticker)) continue;
 
-  const earningsWarning = context.earnings.length > 0
-    ? context.earnings.map((e) => `  ${e.ticker} reports on ${e.date}`).join("\n")
-    : "  None in next 7 days";
+      const isOversoldBounce = s.rsi < 38 && s.bollingerPos < 25 && s.volumeRatio >= 1.1;
+      const isTrendFollow   = s.rsi >= 45 && s.rsi <= 60 && s.change5d > 1.5 && s.bollingerPos >= 30 && s.bollingerPos <= 65 && s.macdHistogram > 0;
+      const isBreakout      = s.changePct > 1.5 && s.volumeRatio > 1.5 && s.rsi < 68 && s.bollingerPos < 80;
 
-  const wsbLines = context.wsb.length > 0
-    ? context.wsb.map((w) => `  ${w.ticker}: ${w.mentions} mentions, ${w.sentiment} — "${w.topPost}"`).join("\n")
-    : "  No significant mentions";
+      let reason = "";
+      if (isOversoldBounce) reason = `Oversold bounce: RSI ${s.rsi}, BB ${s.bollingerPos}%, vol ${s.volumeRatio}x`;
+      else if (isTrendFollow) reason = `Trend follow: RSI ${s.rsi}, 5d momentum +${s.change5d}%, MACD positive`;
+      else if (isBreakout)  reason = `Breakout: +${s.changePct.toFixed(1)}% today, vol ${s.volumeRatio}x average`;
+
+      if (reason) { candidates.push({ ticker: s.ticker, name: s.name, action: "BUY", technicalReason: reason, scan: s }); slots--; }
+    }
+  }
+
+  return candidates;
+}
+
+// Phase 2: AI reviews only rule-qualified candidates for sentiment/news/macro context
+async function getAIVerdicts(candidates: Candidate[], context: Context): Promise<AIDecision[]> {
+  if (!candidates.length) return [];
 
   const marketMood = context.fearGreedScore !== null
     ? `Fear & Greed: ${context.fearGreedScore}/100 (${context.fearGreedRating})`
@@ -104,46 +146,36 @@ async function getAIDecisions(
   const vixLine = context.vix !== null
     ? `VIX: ${context.vix} (${context.vix > 30 ? "HIGH VOLATILITY" : context.vix > 20 ? "Elevated" : "Normal"})`
     : "VIX: unavailable";
+  const wsbMap = new Map(context.wsb.map((w) => [w.ticker, w]));
 
-  const prompt = `You are an aggressive AI stock trader. Your ONLY goal is to MAXIMIZE PROFIT.
+  const candidateLines = candidates.map((c) => {
+    const wsb = wsbMap.get(c.ticker);
+    const wsbNote = wsb ? ` | WSB: ${wsb.mentions} mentions, ${wsb.sentiment}` : "";
+    const pnl = c.pnlPct !== undefined ? ` | P&L: ${c.pnlPct >= 0 ? "+" : ""}${c.pnlPct.toFixed(1)}%` : "";
+    return `  ${c.action} ${c.ticker}: ${c.technicalReason}${pnl}${wsbNote}`;
+  }).join("\n");
 
-Use ANY strategy that makes money:
-- Momentum: buy stocks surging with high volume, sell when momentum fades
-- Mean reversion: buy extreme oversold dips, sell recovery
-- Breakout: buy when volume spikes + price breaks resistance
-- Scalping: take quick 1-3% gains and recycle capital into the next trade
-- Trend: buy stocks in strong uptrends (RSI 50-65, rising 5d momentum)
+  const prompt = `You are a risk manager reviewing trade candidates that already passed technical rules.
 
-PORTFOLIO: $${cash.toFixed(2)} cash | $${TRADE_AMOUNT.toLocaleString()} per trade | Max 1 position per ticker
-
-MARKET:
+MARKET CONDITIONS:
   ${marketMood}
   ${vixLine}
 
-UPCOMING EARNINGS (high risk — avoid buying, consider selling before):
-${earningsWarning}
+UPCOMING EARNINGS RISK: ${context.earnings.map((e) => `${e.ticker} on ${e.date}`).join(", ") || "none"}
 
-REDDIT WSB (momentum signals):
-${wsbLines}
+TRADE CANDIDATES (already approved by technical rules — your job is to VETO bad ones):
+${candidateLines}
 
-CURRENT POSITIONS (ticker | bought | now | P&L% | RSI | signal):
-${positionLines || "  None"}
+VETO a trade if:
+- Earnings within 2 days (too risky)
+- WSB sentiment is very negative AND technical signal is weak
+- Market VIX > 35 AND it's a BUY (too volatile)
+- Extreme Greed (Fear&Greed > 80) AND buying at 52W high
 
-WATCHLIST (ticker | sector | price | 1d% | 5d% | RSI | signal | vol ratio | BB pos | 52W%):
-${watchlistLines}
+APPROVE everything else. When in doubt, APPROVE — the rules already filtered the list.
 
-HARD RULES — never break these:
-1. Max 8 open positions total (currently holding ${positions.length})
-2. SELL immediately if any position is down -3% or more — capital protection
-3. Avoid buying stocks with earnings within 2 days
-
-EVERYTHING ELSE IS YOUR CALL. Be aggressive. Make multiple trades per run if opportunities exist.
-High volume ratio (>1.5x) = unusual activity — pay attention.
-BB position: 0% = at lower band (oversold), 100% = at upper band (overbought).
-
-Return ONLY a JSON array of ALL trades you want to execute right now:
-[{"ticker":"XYZ","action":"BUY","reason":"one sentence"},{"ticker":"ABC","action":"SELL","reason":"one sentence"}]
-Empty array [] if no good opportunities.`;
+Return JSON array — include ALL candidates, mark each APPROVE or VETO:
+[{"ticker":"XYZ","action":"BUY","verdict":"APPROVE","reason":"one sentence"},{"ticker":"ABC","action":"SELL","verdict":"VETO","reason":"earnings tomorrow"}]`;
 
   for (const model of GEMINI_MODELS) {
     try {
@@ -162,27 +194,40 @@ Empty array [] if no good opportunities.`;
       const data = await res.json();
       const text = data?.candidates?.[0]?.content?.parts?.[0]?.text;
       if (!text) continue;
-      const raw: { ticker: string; action: string; reason: string }[] = JSON.parse(text);
-      return raw
-        .filter((d) => d.action === "BUY" || d.action === "SELL")
-        .map((d) => {
-          const scan = scanResults.find((s) => s.ticker === d.ticker);
-          const pos = heldMap.get(d.ticker);
-          if (!scan) return null;
+      const raw: { ticker: string; action: string; verdict: string; reason: string }[] = JSON.parse(text);
+      const approvedTickers = new Set(
+        raw.filter((r) => r.verdict === "APPROVE").map((r) => r.ticker)
+      );
+      // Force-approve stop-losses regardless of AI verdict
+      candidates.filter((c) => c.technicalReason.startsWith("Stop-loss")).forEach((c) => approvedTickers.add(c.ticker));
+
+      return candidates
+        .filter((c) => approvedTickers.has(c.ticker))
+        .map((c) => {
+          const verdict = raw.find((r) => r.ticker === c.ticker);
           return {
-            ticker: d.ticker, name: scan.name,
-            action: d.action as "BUY" | "SELL",
-            reason: d.reason,
-            currentPrice: scan.price, signal: scan.signal,
-            rsi: scan.rsi, posIn52: scan.posIn52,
-            buyPrice: pos?.buyPrice,
-            unrealizedPnLPct: pos ? ((scan.price - pos.buyPrice) / pos.buyPrice) * 100 : undefined,
-          };
-        })
-        .filter(Boolean) as AIDecision[];
+            ticker: c.ticker, name: c.name,
+            action: c.action,
+            reason: verdict?.reason ?? c.technicalReason,
+            currentPrice: c.scan.price, signal: c.scan.signal,
+            rsi: c.scan.rsi, posIn52: c.scan.posIn52,
+            buyPrice: c.buyPrice,
+            unrealizedPnLPct: c.pnlPct,
+          } as AIDecision;
+        });
     } catch { continue; }
   }
-  throw new Error("All Gemini models failed");
+
+  // If AI fails, fall back to executing all candidates (rules already vetted them)
+  return candidates.map((c) => ({
+    ticker: c.ticker, name: c.name,
+    action: c.action,
+    reason: c.technicalReason,
+    currentPrice: c.scan.price, signal: c.scan.signal,
+    rsi: c.scan.rsi, posIn52: c.scan.posIn52,
+    buyPrice: c.buyPrice,
+    unrealizedPnLPct: c.pnlPct,
+  } as AIDecision));
 }
 
 export async function GET(req: NextRequest) {
@@ -243,33 +288,9 @@ export async function GET(req: NextRequest) {
       wsb,
     };
 
-    // Forced stop-loss: sell any position down -3% regardless of AI
-    const forcedSells: typeof positions = [];
-    for (const pos of positions) {
-      const scan = scanResults.find((s) => s.ticker === pos.ticker);
-      if (scan) {
-        const pnlPct = ((scan.price - pos.buyPrice) / pos.buyPrice) * 100;
-        if (pnlPct <= -3) forcedSells.push(pos);
-      }
-    }
-
-    const decisions = await getAIDecisions(scanResults, positions, cash, context);
-
-    // Merge forced sells (deduplicate with AI decisions)
-    const aiSellTickers = new Set(decisions.filter((d) => d.action === "SELL").map((d) => d.ticker));
-    for (const pos of forcedSells) {
-      if (!aiSellTickers.has(pos.ticker)) {
-        const scan = scanResults.find((s) => s.ticker === pos.ticker)!;
-        decisions.push({
-          ticker: pos.ticker, name: pos.name, action: "SELL",
-          reason: "Forced stop-loss: position down -3%",
-          currentPrice: scan.price, signal: scan.signal,
-          rsi: scan.rsi, posIn52: scan.posIn52,
-          buyPrice: pos.buyPrice,
-          unrealizedPnLPct: ((scan.price - pos.buyPrice) / pos.buyPrice) * 100,
-        });
-      }
-    }
+    const earningsTickers = new Set(context.earnings.map((e) => e.ticker));
+    const candidates = applyRules(scanResults, positions, cash, earningsTickers);
+    const decisions = await getAIVerdicts(candidates, context);
 
     const executedTrades: { ticker: string; action: string; reason: string; price: number }[] = [];
     const sorted = [...decisions].sort((a, b) =>
