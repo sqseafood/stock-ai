@@ -27,8 +27,8 @@ export interface Portfolio {
   trades: Trade[];
 }
 
-export const STARTING_CASH = 10_000;
-export const TRADE_AMOUNT = 1_000; // $1,000 per trade
+export const STARTING_CASH = 20_000;
+export const TRADE_AMOUNT = 2_000; // $1,000 per trade
 
 export function getPortfolio(): Portfolio {
   if (typeof window === "undefined") return { cash: STARTING_CASH, positions: [], trades: [] };

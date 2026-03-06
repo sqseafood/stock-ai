@@ -81,7 +81,7 @@ async function getAIDecisions(
 
   const prompt = `You are an AI stock trader. Buy-low, sell-high strategy. No emotional bias.
 
-PORTFOLIO: $${cash.toFixed(2)} cash. $1,000 per trade. Max 1 position per stock.
+PORTFOLIO: $${cash.toFixed(2)} cash. $2,000 per trade. Max 1 position per stock.
 
 CURRENT POSITIONS:
 ${positionLines || "  None"}

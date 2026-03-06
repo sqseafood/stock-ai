@@ -37,8 +37,8 @@ export interface CronLog {
   error?: string;
 }
 
-export const STARTING_CASH = 10_000;
-export const TRADE_AMOUNT = 1_000;
+export const STARTING_CASH = 20_000;
+export const TRADE_AMOUNT = 2_000;
 const PORTFOLIO_KEY = "portfolio.json";
 const CRON_LOG_KEY = "cron-log.json";
 
