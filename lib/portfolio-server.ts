@@ -25,6 +25,7 @@ export interface Trade {
 }
 
 export interface Portfolio {
+  startingCash?: number;
   cash: number;
   positions: Position[];
   trades: Trade[];

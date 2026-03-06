@@ -18,10 +18,12 @@ export async function POST(req: NextRequest) {
     name?: string;
     price?: number;
     signal?: string;
+    startingCash?: number;
   };
 
   if (body.action === "RESET") {
-    const fresh: Portfolio = { cash: STARTING_CASH, positions: [], trades: [] };
+    const cash = Math.max(1, body.startingCash ?? STARTING_CASH);
+    const fresh: Portfolio = { cash, startingCash: cash, positions: [], trades: [] };
     await savePortfolio(fresh);
     return NextResponse.json(fresh);
   }

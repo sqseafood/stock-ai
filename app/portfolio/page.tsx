@@ -34,6 +34,7 @@ export default function PortfolioPage() {
   const [loading, setLoading] = useState(true);
   const [loadingPrices, setLoadingPrices] = useState(false);
   const [confirmReset, setConfirmReset] = useState(false);
+  const [resetCash, setResetCash] = useState<string>("");
   const [activeTab, setActiveTab] = useState<"positions" | "history" | "log">("positions");
 
   const loadData = useCallback(async () => {
@@ -74,15 +75,17 @@ export default function PortfolioPage() {
   }
 
   async function handleReset() {
-    if (!confirmReset) { setConfirmReset(true); return; }
-    await fetch("/api/portfolio", {
+    const startingCash = parseFloat(resetCash) || STARTING_CASH;
+    const res = await fetch("/api/portfolio", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ action: "RESET" }),
+      body: JSON.stringify({ action: "RESET", startingCash }),
     });
-    setPortfolio({ cash: STARTING_CASH, positions: [], trades: [] });
+    const fresh = await res.json();
+    setPortfolio(fresh);
     setPrices({});
     setConfirmReset(false);
+    setResetCash("");
   }
 
   if (loading || !portfolio) {
@@ -97,8 +100,9 @@ export default function PortfolioPage() {
     return sum + pos.shares * (prices[pos.ticker] ?? pos.buyPrice);
   }, 0);
   const totalValue = portfolio.cash + positionValue;
-  const totalPnL = totalValue - STARTING_CASH;
-  const totalPnLPct = (totalPnL / STARTING_CASH) * 100;
+  const startingCash = portfolio.startingCash ?? STARTING_CASH;
+  const totalPnL = totalValue - startingCash;
+  const totalPnLPct = (totalPnL / startingCash) * 100;
   const sells = portfolio.trades.filter((t) => t.type === "SELL");
   const wins = sells.filter((t) => (t.pnl ?? 0) > 0).length;
   const winRate = sells.length > 0 ? (wins / sells.length) * 100 : null;
@@ -129,17 +133,36 @@ export default function PortfolioPage() {
             >
               AI Trader
             </Link>
-            <button
-              onClick={handleReset}
-              onBlur={() => setConfirmReset(false)}
-              className={`text-xs px-3 py-1.5 rounded-lg border transition-colors ${
-                confirmReset
-                  ? "bg-red-900/50 border-red-700 text-red-400"
-                  : "bg-gray-800 border-gray-700 text-gray-400 hover:text-white"
-              }`}
-            >
-              {confirmReset ? "Confirm Reset?" : "Reset"}
-            </button>
+            {confirmReset ? (
+              <div className="flex items-center gap-2">
+                <input
+                  type="number"
+                  value={resetCash}
+                  onChange={(e) => setResetCash(e.target.value)}
+                  placeholder={String(STARTING_CASH)}
+                  className="text-xs w-28 px-2 py-1.5 rounded-lg bg-gray-800 border border-gray-700 text-white placeholder-gray-600 focus:outline-none focus:border-blue-500"
+                />
+                <button
+                  onClick={handleReset}
+                  className="text-xs px-3 py-1.5 rounded-lg bg-red-900/50 border border-red-700 text-red-400 hover:bg-red-900/70 transition-colors"
+                >
+                  Confirm
+                </button>
+                <button
+                  onClick={() => { setConfirmReset(false); setResetCash(""); }}
+                  className="text-xs px-3 py-1.5 rounded-lg bg-gray-800 border border-gray-700 text-gray-400 hover:text-white transition-colors"
+                >
+                  Cancel
+                </button>
+              </div>
+            ) : (
+              <button
+                onClick={() => setConfirmReset(true)}
+                className="text-xs px-3 py-1.5 rounded-lg border bg-gray-800 border-gray-700 text-gray-400 hover:text-white transition-colors"
+              >
+                Reset
+              </button>
+            )}
           </div>
         </div>
       </div>
@@ -277,7 +300,7 @@ export default function PortfolioPage() {
                     {fmt(totalRealizedPnL)}
                   </p>
                   <p className={`text-[10px] ${totalRealizedPnL >= 0 ? "text-green-600" : "text-red-600"}`}>
-                    {pct((totalRealizedPnL / STARTING_CASH) * 100)} vs start
+                    {pct((totalRealizedPnL / startingCash) * 100)} vs start
                   </p>
                 </div>
               </div>
