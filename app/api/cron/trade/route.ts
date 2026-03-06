@@ -3,7 +3,8 @@ import { appendCronLog, loadPortfolio, savePortfolio, applySell, applyBuy, TRADE
 import { getAccount, getPositions, placeBuyOrder, closePosition } from "@/lib/alpaca";
 import { getQuote, getCandles, getMetrics, delay } from "@/lib/finnhub";
 import { calcRSI, calcMACD, signalStrength } from "@/lib/indicators";
-import { WATCHLIST } from "@/lib/stocks";
+import { buildWatchlist, getBatch } from "@/lib/stocks-full";
+import { loadConfig, saveConfig } from "@/lib/watchlist-config";
 import { getFearGreed, getVIX, getUpcomingEarnings, getWSBSentiment } from "@/lib/market-context";
 import type { ScanResult } from "@/app/api/scan/route";
 import type { AIDecision } from "@/app/api/ai-trader/route";
@@ -23,10 +24,10 @@ function isMarketOpen(): boolean {
   return totalMins >= 9 * 60 + 30 && totalMins < 16 * 60;
 }
 
-async function scanAll(): Promise<ScanResult[]> {
+async function scanAll(watchlist: { ticker: string; name: string; sector: string }[]): Promise<ScanResult[]> {
   const results: ScanResult[] = [];
-  for (let i = 0; i < WATCHLIST.length; i++) {
-    const { ticker, name, sector } = WATCHLIST[i];
+  for (let i = 0; i < watchlist.length; i++) {
+    const { ticker, name, sector } = watchlist[i];
     try {
       const [quote, candles, metrics] = await Promise.all([
         getQuote(ticker), getCandles(ticker, 6), getMetrics(ticker),
@@ -52,7 +53,7 @@ async function scanAll(): Promise<ScanResult[]> {
         pe: pe && pe > 0 ? pe : null, marketCap,
       });
     } catch { /* skip */ }
-    if (i < WATCHLIST.length - 1) await delay(500);
+    if (i < watchlist.length - 1) await delay(500);
   }
   return results;
 }
@@ -177,7 +178,18 @@ export async function GET(req: NextRequest) {
   }
 
   try {
-    const scanResults = await scanAll();
+    // Load config and build this run's batch
+    const config = await loadConfig();
+    const fullWatchlist = buildWatchlist(config);
+    const watchlist = getBatch(fullWatchlist, config.batchSize, config.currentBatchIndex);
+
+    // Advance batch index for next run
+    const nextIndex = (config.currentBatchIndex + 1) * config.batchSize >= fullWatchlist.length
+      ? 0
+      : config.currentBatchIndex + 1;
+    await saveConfig({ ...config, currentBatchIndex: nextIndex });
+
+    const scanResults = await scanAll(watchlist);
     if (!scanResults.length) {
       return NextResponse.json({ skipped: true, reason: "No scan data" });
     }
@@ -190,7 +202,7 @@ export async function GET(req: NextRequest) {
       cash = parseFloat(account.cash);
       positions = alpacaPositions.map((p) => ({
         ticker: p.symbol,
-        name: WATCHLIST.find((w) => w.ticker === p.symbol)?.name ?? p.symbol,
+        name: fullWatchlist.find((w) => w.ticker === p.symbol)?.name ?? p.symbol,
         shares: parseFloat(p.qty),
         buyPrice: parseFloat(p.avg_entry_price),
       }));

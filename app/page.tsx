@@ -102,6 +102,12 @@ export default function Dashboard() {
           >
             AI Trader
           </Link>
+          <Link
+            href="/settings"
+            className="bg-gray-800 border border-gray-700 text-gray-400 px-3 py-1.5 rounded-full font-semibold hover:bg-gray-700 transition-colors"
+          >
+            ⚙ Watchlist
+          </Link>
         </div>
       </div>
 
