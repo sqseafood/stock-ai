@@ -183,11 +183,11 @@ export async function GET(req: NextRequest) {
     const fullWatchlist = buildWatchlist(config);
     const watchlist = getBatch(fullWatchlist, config.batchSize, config.currentBatchIndex);
 
-    // Advance batch index for next run
+    // Advance batch index for next run (non-fatal)
     const nextIndex = (config.currentBatchIndex + 1) * config.batchSize >= fullWatchlist.length
       ? 0
       : config.currentBatchIndex + 1;
-    await saveConfig({ ...config, currentBatchIndex: nextIndex });
+    try { await saveConfig({ ...config, currentBatchIndex: nextIndex }); } catch { /* non-fatal */ }
 
     const scanResults = await scanAll(watchlist);
     if (!scanResults.length) {
@@ -254,7 +254,7 @@ export async function GET(req: NextRequest) {
       }
     }
 
-    await appendCronLog({ runAt, decisionsCount: executedTrades.length, trades: executedTrades });
+    try { await appendCronLog({ runAt, decisionsCount: executedTrades.length, trades: executedTrades }); } catch { /* non-fatal */ }
     return NextResponse.json({
       success: true,
       mode: USE_ALPACA ? "alpaca-paper" : "mock",
@@ -262,7 +262,7 @@ export async function GET(req: NextRequest) {
       trades: executedTrades,
     });
   } catch (err) {
-    await appendCronLog({ runAt, decisionsCount: 0, trades: [], error: (err as Error).message });
+    try { await appendCronLog({ runAt, decisionsCount: 0, trades: [], error: (err as Error).message }); } catch { /* non-fatal */ }
     return NextResponse.json({ error: (err as Error).message }, { status: 500 });
   }
 }
