@@ -35,6 +35,8 @@ export default function PortfolioPage() {
   const [loadingPrices, setLoadingPrices] = useState(false);
   const [confirmReset, setConfirmReset] = useState(false);
   const [resetCash, setResetCash] = useState<string>("");
+  const [showAddFunds, setShowAddFunds] = useState(false);
+  const [addAmount, setAddAmount] = useState<string>("");
   const [activeTab, setActiveTab] = useState<"positions" | "history" | "log">("positions");
 
   const loadData = useCallback(async () => {
@@ -88,6 +90,20 @@ export default function PortfolioPage() {
     setResetCash("");
   }
 
+  async function handleAddFunds() {
+    const amount = parseFloat(addAmount);
+    if (!amount || amount <= 0) return;
+    const res = await fetch("/api/portfolio", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "ADD_FUNDS", startingCash: amount }),
+    });
+    const updated = await res.json();
+    setPortfolio(updated);
+    setShowAddFunds(false);
+    setAddAmount("");
+  }
+
   if (loading || !portfolio) {
     return (
       <div className="min-h-screen bg-gray-950 flex items-center justify-center">
@@ -127,6 +143,36 @@ export default function PortfolioPage() {
             </p>
           </div>
           <div className="flex items-center gap-2">
+            {showAddFunds ? (
+              <div className="flex items-center gap-2">
+                <input
+                  type="number"
+                  value={addAmount}
+                  onChange={(e) => setAddAmount(e.target.value)}
+                  placeholder="Amount"
+                  className="text-xs w-24 px-2 py-1.5 rounded-lg bg-gray-800 border border-gray-700 text-white placeholder-gray-600 focus:outline-none focus:border-green-500"
+                />
+                <button
+                  onClick={handleAddFunds}
+                  className="text-xs px-3 py-1.5 rounded-lg bg-green-900/50 border border-green-700 text-green-400 hover:bg-green-900/70 transition-colors"
+                >
+                  Add
+                </button>
+                <button
+                  onClick={() => { setShowAddFunds(false); setAddAmount(""); }}
+                  className="text-xs px-3 py-1.5 rounded-lg bg-gray-800 border border-gray-700 text-gray-400 hover:text-white transition-colors"
+                >
+                  Cancel
+                </button>
+              </div>
+            ) : (
+              <button
+                onClick={() => setShowAddFunds(true)}
+                className="text-xs px-3 py-1.5 rounded-lg border bg-green-900/30 border-green-800 text-green-400 hover:bg-green-900/60 transition-colors"
+              >
+                + Add Funds
+              </button>
+            )}
             <Link
               href="/ai-trader"
               className="text-xs px-3 py-1.5 rounded-lg bg-purple-900/40 border border-purple-800 text-purple-300 hover:bg-purple-900/70 transition-colors font-semibold"
@@ -135,6 +181,36 @@ export default function PortfolioPage() {
             </Link>
             {confirmReset ? (
               <div className="flex items-center gap-2">
+            {showAddFunds ? (
+              <div className="flex items-center gap-2">
+                <input
+                  type="number"
+                  value={addAmount}
+                  onChange={(e) => setAddAmount(e.target.value)}
+                  placeholder="Amount"
+                  className="text-xs w-24 px-2 py-1.5 rounded-lg bg-gray-800 border border-gray-700 text-white placeholder-gray-600 focus:outline-none focus:border-green-500"
+                />
+                <button
+                  onClick={handleAddFunds}
+                  className="text-xs px-3 py-1.5 rounded-lg bg-green-900/50 border border-green-700 text-green-400 hover:bg-green-900/70 transition-colors"
+                >
+                  Add
+                </button>
+                <button
+                  onClick={() => { setShowAddFunds(false); setAddAmount(""); }}
+                  className="text-xs px-3 py-1.5 rounded-lg bg-gray-800 border border-gray-700 text-gray-400 hover:text-white transition-colors"
+                >
+                  Cancel
+                </button>
+              </div>
+            ) : (
+              <button
+                onClick={() => setShowAddFunds(true)}
+                className="text-xs px-3 py-1.5 rounded-lg border bg-green-900/30 border-green-800 text-green-400 hover:bg-green-900/60 transition-colors"
+              >
+                + Add Funds
+              </button>
+            )}
                 <input
                   type="number"
                   value={resetCash}

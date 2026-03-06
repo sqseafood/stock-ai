@@ -13,13 +13,22 @@ export async function GET() {
 
 export async function POST(req: NextRequest) {
   const body = await req.json() as {
-    action: "BUY" | "SELL" | "RESET";
+    action: "BUY" | "SELL" | "RESET" | "ADD_FUNDS";
     ticker?: string;
     name?: string;
     price?: number;
     signal?: string;
     startingCash?: number;
   };
+
+  if (body.action === "ADD_FUNDS") {
+    const amount = Math.max(1, body.startingCash ?? 0);
+    const portfolio = await loadPortfolio();
+    portfolio.cash += amount;
+    portfolio.startingCash = (portfolio.startingCash ?? STARTING_CASH) + amount;
+    await savePortfolio(portfolio);
+    return NextResponse.json(portfolio);
+  }
 
   if (body.action === "RESET") {
     const cash = Math.max(1, body.startingCash ?? STARTING_CASH);
