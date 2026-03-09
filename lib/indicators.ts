@@ -35,6 +35,34 @@ export function calcSMA(closes: number[], period: number): number {
   return slice.reduce((a, b) => a + b, 0) / slice.length;
 }
 
+// Multi-timeframe momentum: % return over N days
+export function calcMomentum(closes: number[]): { d20: number; d60: number } {
+  const last = closes.at(-1)!;
+  const d20 = closes.length >= 21 ? +((last / closes.at(-21)! - 1) * 100).toFixed(2) : 0;
+  const d60 = closes.length >= 61 ? +((last / closes.at(-61)! - 1) * 100).toFixed(2) : 0;
+  return { d20, d60 };
+}
+
+// Price vs key moving averages (% above = positive, below = negative)
+export function calcSMADistances(closes: number[]): {
+  vsSma20: number | null;
+  vsSma50: number | null;
+  vsSma200: number | null;
+  goldenCross: boolean | null; // SMA50 > SMA200
+} {
+  const price = closes.at(-1)!;
+  const sma = (n: number) => closes.length >= n
+    ? closes.slice(-n).reduce((a, b) => a + b, 0) / n
+    : null;
+  const s20 = sma(20), s50 = sma(50), s200 = sma(200);
+  return {
+    vsSma20: s20 ? +((price / s20 - 1) * 100).toFixed(1) : null,
+    vsSma50: s50 ? +((price / s50 - 1) * 100).toFixed(1) : null,
+    vsSma200: s200 ? +((price / s200 - 1) * 100).toFixed(1) : null,
+    goldenCross: s50 && s200 ? s50 > s200 : null,
+  };
+}
+
 export function calcBollingerBands(closes: number[], period = 20) {
   const slice = closes.slice(-period);
   const sma = slice.reduce((a, b) => a + b, 0) / period;

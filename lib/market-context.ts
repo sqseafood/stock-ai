@@ -1,5 +1,83 @@
 import { WATCHLIST } from "@/lib/stocks";
 
+// --- Sector ETF Performance (Yahoo Finance, no key needed) ---
+const SECTOR_ETFS = [
+  { sector: "Technology",       etf: "XLK" },
+  { sector: "Financials",       etf: "XLF" },
+  { sector: "Healthcare",       etf: "XLV" },
+  { sector: "Energy",           etf: "XLE" },
+  { sector: "Industrials",      etf: "XLI" },
+  { sector: "Consumer Disc",    etf: "XLY" },
+  { sector: "Consumer Staples", etf: "XLP" },
+  { sector: "Utilities",        etf: "XLU" },
+  { sector: "Materials",        etf: "XLB" },
+  { sector: "Real Estate",      etf: "XLRE" },
+  { sector: "Communication",    etf: "XLC" },
+];
+
+export interface SectorPerf {
+  sector: string;
+  etf: string;
+  changePct: number;
+}
+
+export async function getSectorPerformance(): Promise<SectorPerf[]> {
+  try {
+    const results = await Promise.all(
+      SECTOR_ETFS.map(async ({ sector, etf }) => {
+        try {
+          const res = await fetch(
+            `https://query1.finance.yahoo.com/v8/finance/chart/${etf}?interval=1d&range=5d`,
+            { headers: { "User-Agent": "Mozilla/5.0" }, next: { revalidate: 0 } }
+          );
+          const data = await res.json();
+          const quote = data?.chart?.result?.[0]?.indicators?.quote?.[0];
+          const closes: number[] = (quote?.close ?? []).filter(Boolean);
+          if (closes.length < 2) return { sector, etf, changePct: 0 };
+          const changePct = +((closes.at(-1)! / closes.at(-2)! - 1) * 100).toFixed(2);
+          return { sector, etf, changePct };
+        } catch { return { sector, etf, changePct: 0 }; }
+      })
+    );
+    return results.sort((a, b) => b.changePct - a.changePct);
+  } catch { return []; }
+}
+
+// --- Economic Calendar (Finnhub) — Fed, CPI, jobs, GDP, etc. ---
+export interface EconomicEvent {
+  event: string;
+  country: string;
+  date: string;
+  impact: string; // "high" | "medium" | "low"
+  estimate?: string;
+  prev?: string;
+}
+
+export async function getEconomicCalendar(days = 7): Promise<EconomicEvent[]> {
+  try {
+    const from = new Date().toISOString().split("T")[0];
+    const to = new Date(Date.now() + days * 86400000).toISOString().split("T")[0];
+    const res = await fetch(
+      `https://finnhub.io/api/v1/calendar/economic?from=${from}&to=${to}&token=${process.env.FINNHUB_API_KEY}`,
+      { next: { revalidate: 0 } }
+    );
+    if (!res.ok) return [];
+    const data = await res.json();
+    const events: EconomicEvent[] = (data?.economicCalendar ?? [])
+      .filter((e: { country: string; impact: string }) => e.country === "US" && e.impact === "high")
+      .slice(0, 10)
+      .map((e: { event: string; country: string; time: string; impact: string; estimate?: string; prev?: string }) => ({
+        event: e.event,
+        country: e.country,
+        date: e.time?.split("T")[0] ?? from,
+        impact: e.impact,
+        estimate: e.estimate ?? undefined,
+        prev: e.prev ?? undefined,
+      }));
+    return events;
+  } catch { return []; }
+}
+
 // --- Fear & Greed Index (CNN) ---
 export interface FearGreed {
   score: number;       // 0-100

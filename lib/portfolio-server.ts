@@ -22,6 +22,7 @@ export interface Trade {
   pnl?: number;
   pnlPct?: number;
   source?: "manual" | "cron"; // who made the trade
+  aiReason?: string; // AI's reasoning at the time of the trade
 }
 
 export interface Portfolio {
@@ -94,7 +95,8 @@ export async function appendCronLog(entry: CronLog): Promise<void> {
 export function applyBuy(
   p: Portfolio,
   ticker: string, name: string, price: number, signal: string,
-  source: "manual" | "cron" = "manual"
+  source: "manual" | "cron" = "manual",
+  aiReason?: string
 ): string | null {
   if (p.positions.find((pos) => pos.ticker === ticker)) return "Already holding this stock";
   const spend = Math.min(TRADE_AMOUNT, p.cash);
@@ -105,7 +107,7 @@ export function applyBuy(
   p.trades.push({
     id: Date.now().toString() + Math.random(),
     ticker, name, type: "BUY", shares, price, total: spend,
-    date: new Date().toISOString(), signal, source,
+    date: new Date().toISOString(), signal, source, aiReason,
   });
   return null;
 }
@@ -113,7 +115,8 @@ export function applyBuy(
 export function applySell(
   p: Portfolio,
   ticker: string, currentPrice: number, signal: string,
-  source: "manual" | "cron" = "manual"
+  source: "manual" | "cron" = "manual",
+  aiReason?: string
 ): string | null {
   const pos = p.positions.find((pos) => pos.ticker === ticker);
   if (!pos) return "No position to sell";
@@ -126,7 +129,51 @@ export function applySell(
   p.trades.push({
     id: Date.now().toString() + Math.random(),
     ticker, name: pos.name, type: "SELL", shares: pos.shares, price: currentPrice, total,
-    date: new Date().toISOString(), signal, pnl, pnlPct, source,
+    date: new Date().toISOString(), signal, pnl, pnlPct, source, aiReason,
   });
   return null;
+}
+
+// Pairs BUY/SELL trades and returns completed round-trips for AI learning
+export interface CompletedTrade {
+  ticker: string;
+  name: string;
+  pnlPct: number;
+  durationHours: number;
+  buyReason?: string;
+  sellReason?: string;
+  buyDate: string;
+}
+
+export function getCompletedTrades(trades: Trade[], limit = 20): CompletedTrade[] {
+  const sells = trades.filter((t) => t.type === "SELL" && t.pnlPct !== undefined);
+  const buys = trades.filter((t) => t.type === "BUY");
+  const buyMap = new Map<string, Trade[]>();
+  for (const b of buys) {
+    const list = buyMap.get(b.ticker) ?? [];
+    list.push(b);
+    buyMap.set(b.ticker, list);
+  }
+
+  const result: CompletedTrade[] = [];
+  for (const sell of sells.slice(0, limit)) {
+    const matchingBuys = buyMap.get(sell.ticker) ?? [];
+    // Find the most recent buy before this sell
+    const buy = matchingBuys
+      .filter((b) => b.date < sell.date)
+      .sort((a, b) => b.date.localeCompare(a.date))[0];
+    const durationHours = buy
+      ? Math.round((new Date(sell.date).getTime() - new Date(buy.date).getTime()) / 3600000 * 10) / 10
+      : 0;
+    result.push({
+      ticker: sell.ticker,
+      name: sell.name,
+      pnlPct: sell.pnlPct!,
+      durationHours,
+      buyReason: buy?.aiReason,
+      sellReason: sell.aiReason,
+      buyDate: buy?.date ?? sell.date,
+    });
+  }
+  return result;
 }

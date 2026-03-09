@@ -71,5 +71,64 @@ export async function getNews(symbol: string, days = 7) {
   return api(`/company-news?symbol=${symbol}&from=${from}&to=${to}`);
 }
 
+// Broad market/macro news (Fed, regulation, politics, rates, trade)
+// category: "general" | "forex" | "merger"
+export async function getMarketNews(category = "general", limit = 20): Promise<{ headline: string; summary: string; datetime: number }[]> {
+  try {
+    const data = await api(`/news?category=${category}`);
+    if (!Array.isArray(data)) return [];
+    return data
+      .filter((a: { headline?: string }) => a.headline)
+      .slice(0, limit)
+      .map((a: { headline: string; summary?: string; datetime: number }) => ({
+        headline: a.headline.trim(),
+        summary: (a.summary ?? "").slice(0, 200).trim(),
+        datetime: a.datetime,
+      }));
+  } catch { return []; }
+}
+
+// Returns top N recent headlines (last `days` days), empty array on failure
+export async function getRecentHeadlines(symbol: string, days = 5, limit = 4): Promise<string[]> {
+  try {
+    const articles = await getNews(symbol, days);
+    if (!Array.isArray(articles)) return [];
+    return articles
+      .filter((a: { headline?: string }) => a.headline)
+      .slice(0, limit)
+      .map((a: { headline: string }) => a.headline.trim());
+  } catch { return []; }
+}
+
+// Earnings history: how many of last N quarters beat estimate (0-N)
+export async function getEarningsBeats(symbol: string, quarters = 4): Promise<number> {
+  try {
+    const data = await api(`/stock/earnings?symbol=${symbol}&limit=${quarters}`);
+    if (!Array.isArray(data) || !data.length) return 0;
+    return data.filter((e: { actual?: number; estimate?: number }) =>
+      e.actual !== null && e.estimate !== null && e.actual !== undefined && e.estimate !== undefined && e.actual > e.estimate
+    ).length;
+  } catch { return 0; }
+}
+
+// Latest analyst consensus: { buy, hold, sell, strongBuy, strongSell, period }
+export interface AnalystRec {
+  strongBuy: number;
+  buy: number;
+  hold: number;
+  sell: number;
+  strongSell: number;
+  period: string;
+}
+
+export async function getAnalystRecs(symbol: string): Promise<AnalystRec | null> {
+  try {
+    const data = await api(`/stock/recommendation?symbol=${symbol}`);
+    if (!Array.isArray(data) || !data.length) return null;
+    const latest = data[0] as AnalystRec;
+    return latest;
+  } catch { return null; }
+}
+
 // Small delay to respect rate limits
 export const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
